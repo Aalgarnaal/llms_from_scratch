@@ -16,7 +16,7 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = config.n_embd
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                              .view(1,1,config.block_size, config.block_size))
-
+    
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -48,7 +48,7 @@ class MLP(nn.Module):
         self.c_proj = nn.Linear(4*config.n_embd, config.n_embd)
 
     def forward(self, x):
-        x = self.ln_1(x)
+        x = self.c_fc(x)
         x = self.gelu(x)
         x = self.c_proj(x)
         return x
@@ -91,6 +91,20 @@ class GPT(nn.Module):
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias = False)
 
+    def forward(self, idx):
+        B, T = idx.size()
+        assert T <= self.config.block_size, f"{T} is longer than context length.."
+        # forward token and position embeddings
+        pos = torch.arange(0, T, dtype=torch.long, device = idx.device)
+        pos_emb = self.transformer.wpe(pos) #    T, n_emb
+        tok_emb = self.transformer.wte(idx) # B, T, n_emb
+        x = tok_emb + pos_emb # note that this is broadcasting the B dimension
+        for block in self.transformer.h:
+            x = block(x)
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x) # B, T, vocab_size
+        return logits
+    
     @classmethod
     def from_pretrained(cls, model_type):
         """Loads pretrained GPT-2 model weights from huggingface"""
@@ -142,5 +156,38 @@ class GPT(nn.Module):
 
         return model
 
-model = GPT.from_pretrained('gpt2')
-print("didnt crash?")
+num_return_sequences = 5
+max_length = 30
+
+model = GPT.from_pretrained('gpt2') #this is our model but with gpt2 params
+model.eval()
+#model.to('cuda')
+
+# prefix tokens
+import tiktoken
+enc = tiktoken.get_encoding('gpt2')
+tokens = enc.encode("Hello, I am a language model, ")
+tokens = torch.tensor(tokens, dtype=torch.long) # length 8
+tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # 5,8
+#x = tokens.to('cuda')
+x = tokens
+
+# Let's generate. We have (B, T) = (5, 8)
+torch.manual_seed(42)
+#torch.cuda.manual_seed(42)
+while x.size(1) < max_length:
+    # forward
+    with torch.no_grad(): 
+        logits = model(x) # B,T,C
+        logits = logits[:,-1,:] # Get the entries for each batch (B,C)
+        probs = F.softmax(logits, dim=-1) #Convert to probabilities
+        topk_probs, topk_indices = torch.topk(probs, 50, dim=-1) # We just keep the top 50, so we never sample super rare stuff
+        ix = torch.multinomial(topk_probs, 1) # (B,1) 
+        xcol = torch.gather(topk_indices, -1, ix)
+        x = torch.cat((x,xcol),dim=1)
+
+# Print text
+for i in range(num_return_sequences):
+    tokens = x[i, :max_length].tolist()
+    decoded = enc.decode(tokens)
+    print(">", decoded)
