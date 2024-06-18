@@ -12,7 +12,7 @@ class DataLoaderLite:
         self.T = T
 
         # at init load tokens from disk and store them in memory
-        with open('../../whatsappjes.txt', 'r') as f:
+        with open('whatsappjes.txt', 'r') as f:
             text = f.read()
         enc = tiktoken.get_encoding('gpt2')
         tokens = enc.encode(text)
@@ -208,6 +208,7 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
 
         return model
+import time
 
 device = "cpu"
 if torch.cuda.is_available():
@@ -217,23 +218,29 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
 #device = "cpu"
 print(f"Using device: {device}")
 
-with open('../../whatsappjes.txt', 'r') as f:
-    text = f.read()
-text = text[:1000]
-
-train_loader = DataLoaderLite(B=4, T=32)
+train_loader = DataLoaderLite(B=4, T=1024)
+torch.set_float32_matmul_precision('high')
 
 #model = GPT.from_pretrained('gpt2') #this is our model but with gpt2 params
 model = GPT(GPTConfig())
 model.to(device)
+model = torch.compile(model)
+
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 for i in range(50):
+    t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    logits, loss = model(x,y)
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        logits, loss = model(x,y)
     loss.backward()
     optimizer.step()
+    torch.cuda.synchronize() #Wait for GPU to finish work that was scheduled
+    t1 = time.time()
+    dt = (t1-t0)*1000 #Time difference in ms
+    print(f"step {i}, loss: {loss}, dt: {dt:.2f}ms")
+
     print(f"Step: {i}, Loss: {loss.item()}")
 print(loss)
 import sys; sys.exit(0)
